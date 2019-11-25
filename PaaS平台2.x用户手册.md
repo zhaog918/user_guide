@@ -386,15 +386,20 @@ Server: &version.Version{SemVer:"v2.12.1", GitCommit:"02a47c7249b1fc6d8fd3b94e6b
 
 ## 4. 安装PaaS平台
 
-#### 4.1 证书配置
-- 配置DNS域名服务，后续平台访问都将使用域名形式（或修改客户机Host文件，window路径：C:\Windows\System32\drivers\etc\hosts，linux路径：/etc/hosts）。
+PaaS平台的安装主要分为下列两种方法：
 
-> 200.200.200.11 paas.com
- 
--  HTTP over SSL
-要保证Web浏览器到服务器的安全连接，HTTPS几乎是唯一选择。HTTPS其实就是HTTP over SSL，也就是让HTTP连接建立在SSL安全连接之上。
-在HTTPS的传输过程中，需要使用数字证书。使用ssl自签名证书脚本：
-```shell
+- 脚本生成自签名证书安装
+  通过脚本手工生成证书，证书参数可自己定义，证书到期需要手动进行更换。
+- cert-manager证书管理工具安装
+  cert-manager是Kubernetes的附加组件，用于自动管理和颁发各种发行来源的TLS证书。cert-manager的好处是证书到期会自动办法新证书。
+
+### 4.1 使用自签名证书脚本安装PaaS平台
+
+#### 4.1.1 生成自签名证书
+
+将下列脚本保存为文件`create_self-signed-cert.sh`，并利用该脚本创建自签名证书。
+
+```sh
 #!/bin/bash -e
 
 help ()
@@ -555,53 +560,87 @@ cp ${SSL_DOMAIN}.key tls.key
 echo "cp ${SSL_DOMAIN}.crt tls.crt"
 cp ${SSL_DOMAIN}.crt tls.crt
 ```
-复制以上代码另存为create_self-signed-cert.sh或者其他您喜欢的文件名。
+
+脚本使用说明：
+
+```sh
+--ssl-domain: 生成ssl证书需要的主域名，如不指定则默认为www.rancher.local，如果是ip访问服务，则可忽略；
+--ssl-trusted-ip: 一般ssl证书只信任域名的访问请求，有时候需要使用ip去访问server，那么需要给ssl证书添加扩展IP，多个IP用逗号隔开；
+--ssl-trusted-domain: 如果想多个域名访问，则添加扩展域名（TRUSTED_DOMAIN）,多个TRUSTED_DOMAIN用逗号隔开；
+--ssl-size: ssl加密位数，默认2048；
+--ssl-date: ssl有效期，默认10年；
+--ca-date: ca有效期，默认10年；
+--ssl-cn: 国家代码(2个字母的代号),默认CN；
 使用示例:
-```shell
-chmod +x create_self-signed-cert.sh
-./create_self-signed-cert.sh --ssl-domain=paas.com --ssl-trusted-ip=200.200.200.11,200.200.200.12,200.200.200.13 --ssl-size=2048 --ssl-date=3650 --ssl-cn=CN
+./create_self-signed-cert.sh --ssl-domain=www.test.com --ssl-size=2048 --ssl-date=365
 ```
 
 
-#### 4.2 平台部署
-- 添加仓库
-使用helm repo add命令添加Rancher chart仓库
-```shell
-helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
-```
 
-- 创建tls密文
-进入创建create_self-signed-cert.sh目录，创建tls密文，用于平台验证
-```shell
-kubectl  -n cattle-system \
-  create secret tls tls-rancher-ingress --cert=./tls.crt --key=./tls.key
-```
+#### 4.1.2 安装PaaS平台
 
-- 配置SSL
-创建其对应的命名空间，配置ca证书密文
-```shell
+利用上一步骤生成的tls.crt、tls.key、cacerts.pem等证书文件完成平台安装
 
-# 创建命名空间
+```sh
+export KUBECONFIG=/home/ubuntu/rke/kube_config_cluster.yml
+export kubeconfig=/home/ubuntu/rke/kube_config_cluster.yml
+
 kubectl create namespace cattle-system
-
-# ca证书密文
 kubectl -n cattle-system create secret \
-generic tls-ca \
---from-file=cacerts.pem
-```shell
-- 安装Paas
-执行如下脚本，对paas平台进行安装
-```shell
-helm install rancher-stable/rancher \
-    --name paas --namespace cattle-system \
-    --set hostname=paas.com \
-    --set privateCA=true
+tls tls-rancher-ingress \
+--cert=./tls.crt \
+--key=./tls.key
+
+kubectl \
+    -n cattle-system \
+    create secret generic tls-ca \
+    --from-file=cacerts.pem
+
+helm --kubeconfig=$KUBECONFIG install ./chart目录 \
+  --name rancher \
+  --namespace cattle-system \
+  --set hostname=和证书匹配的FQDN名称（例如www.test.com） \
+   --set ingress.tls.source=secret \
+  --set privateCA=true
+
 ```
-验证helm list命令中，
-```shell
-kubectl -n cattle-system rollout status deploy/paas
-deployment "rancher" successfully rolled out
+
+### 4.2 使用cert-manager证书管理工具安装PaaS平台
+
+#### 4.2.1 安装cert-manager
+
+```sh
+export KUBECONFIG=/home/ubuntu/rke/kube_config_cluster.yml
+export kubeconfig=/home/ubuntu/rke/kube_config_cluster.yml
+
+kubectl apply -f https://raw.githubusercontent.com/jetstack/cert-manager/release-0.9/deploy/manifests/00-crds.yaml
+
+kubectl create namespace cert-manager
+kubectl label namespace cert-manager certmanager.k8s.io/disable-validation=true
+helm repo add jetstack https://charts.jetstack.iohelm repo add jetstack https://charts.jetstack.io
+helm repo update
+
+helm install \
+  --name cert-manager \
+  --namespace cert-manager \
+  --version v0.9.1 \
+  jetstack/cert-manager
+
+kubectl get pods --namespace cert-manager
 ```
+
+#### 4.2.2 安装PaaS平台
+
+```sh
+helm --kubeconfig=$KUBECONFIG install ./chart目录 \
+  --name rancher \
+  --namespace cattle-system \
+  --set hostname=和证书匹配的FQDN名称（例如www.test.com）
+```
+
+# 
+
+
 
 # 三、使用
 
